@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="vroum_bg">#0D1117</color>
+    <color name="vroum_surface">#161B22</color>
+    <color name="vroum_amber">#FF6B2B</color>
+</resources>

@@ -1,0 +1,6 @@
+{
+  "name": "Vroum",
+  "description": "Écoute ton moteur. Diagnostic acoustique de pannes moteur pour moto, voiture et autres véhicules.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
