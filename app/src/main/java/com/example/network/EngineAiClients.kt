@@ -2,6 +2,7 @@ package com.example.network
 
 import android.util.Base64
 import com.example.model.AcousticMetrics
+import com.example.model.VehicleIdentificationResult
 import com.example.model.VehicleInfo
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -39,6 +40,80 @@ class EngineAiClients {
                 "régularité du ralenti, ratés, cliquetis, claquements, sifflements, " +
                 "bruits métalliques, changements au moment de l'accélération. " +
                 "Ne donne aucun diagnostic, décris seulement le son avec un maximum de détails."
+
+        const val VEHICLE_PHOTO_PROMPT =
+            "Identifie cette moto (ou ce véhicule) : marque, modèle, année approximative, " +
+                "cylindrée et type de moteur probable. Réponds en JSON avec ces champs et un niveau " +
+                "de certitude (faible, moyen, élevé). Si tu hésites entre plusieurs modèles, donne-les tous.\n\n" +
+                "Structure JSON stricte :\n" +
+                "{\n" +
+                "  \"type_vehicule\": \"moto | voiture | autre\",\n" +
+                "  \"marque\": \"...\",\n" +
+                "  \"modele\": \"...\",\n" +
+                "  \"annee_approximative\": \"...\",\n" +
+                "  \"cylindree\": \"...\",\n" +
+                "  \"type_moteur\": \"...\",\n" +
+                "  \"niveau_certitude\": \"faible | moyen | élevé\",\n" +
+                "  \"suggestions\": [\n" +
+                "    {\n" +
+                "      \"marque\": \"...\",\n" +
+                "      \"modele\": \"...\",\n" +
+                "      \"annee_approximative\": \"...\",\n" +
+                "      \"cylindree\": \"...\",\n" +
+                "      \"type_moteur\": \"...\"\n" +
+                "    }\n" +
+                "  ]\n" +
+                "}"
+    }
+
+    suspend fun identifyVehicleFromPhotoWithGemini(
+        apiKey: String,
+        jpegBytes: ByteArray
+    ): VehicleIdentificationResult = withContext(Dispatchers.IO) {
+        val base64Image = Base64.encodeToString(jpegBytes, Base64.NO_WRAP)
+        val payload = JSONObject().apply {
+            put("contents", JSONArray().apply {
+                put(JSONObject().apply {
+                    put("parts", JSONArray().apply {
+                        put(JSONObject().put("text", VEHICLE_PHOTO_PROMPT))
+                        put(JSONObject().put("inline_data", JSONObject().apply {
+                            put("mime_type", "image/jpeg")
+                            put("data", base64Image)
+                        }))
+                    })
+                })
+            })
+            put("generationConfig", JSONObject().apply {
+                put("temperature", 0.2)
+                put("responseMimeType", "application/json")
+            })
+        }
+
+        val request = Request.Builder()
+            .url("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent")
+            .addHeader("x-goog-api-key", apiKey.trim())
+            .post(payload.toString().toRequestBody(jsonMediaType))
+            .build()
+
+        val bodyString = executeRequest("Gemini", request)
+        val root = JSONObject(bodyString)
+        val candidates = root.optJSONArray("candidates")
+        val parts = candidates?.optJSONObject(0)
+            ?.optJSONObject("content")
+            ?.optJSONArray("parts")
+        val text = buildString {
+            if (parts != null) {
+                for (i in 0 until parts.length()) {
+                    val partText = parts.optJSONObject(i)?.optString("text").orEmpty()
+                    if (partText.isNotBlank()) append(partText).append("\n")
+                }
+            }
+        }.trim()
+
+        if (text.isBlank()) {
+            throw DiagnosticApiException.ProviderError("Gemini", "Impossible d'identifier la photo.")
+        }
+        DiagnosisResponseParser.parseVehicleIdentification(text)
     }
 
     suspend fun describeAudioWithGemini(
@@ -163,6 +238,7 @@ class EngineAiClients {
             }
             if (vehicleInfo.year.isNotBlank()) appendLine("Année : ${vehicleInfo.year.trim()}")
             if (vehicleInfo.displacementCc.isNotBlank()) appendLine("Cylindrée : ${vehicleInfo.displacementCc.trim()} cc")
+            if (vehicleInfo.engineType.isNotBlank()) appendLine("Type de moteur probable : ${vehicleInfo.engineType.trim()}")
             if (vehicleInfo.mileage.isNotBlank()) appendLine("Kilométrage : ${vehicleInfo.mileage.trim()} km")
             appendLine()
             appendLine("=== CONSIGNES D'ADAPTATION MÉCANIQUE ===")

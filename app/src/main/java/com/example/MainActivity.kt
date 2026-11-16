@@ -256,6 +256,13 @@ fun VroumApp(
                 onSelectVehicleType = viewModel::selectVehicleType,
                 onUpdateVehicleFields = viewModel::updateVehicleFields,
                 onToggleUnknownBrandModel = viewModel::setUnknownBrandModel,
+                onAnalyzeVehiclePhoto = viewModel::analyzeVehiclePhoto,
+                onCancelPhotoIdentification = viewModel::cancelPhotoIdentification,
+                onSelectSuggestion = viewModel::selectIdentificationSuggestion,
+                onRejectIdentifiedVehicle = viewModel::onRejectIdentifiedVehicle,
+                onNoPhotoSelected = viewModel::onNoPhotoSelected,
+                onResetPhotoStep = viewModel::resetPhotoStep,
+                onDismissPhotoError = viewModel::dismissPhotoError,
                 onSelectTab = viewModel::selectHomeTab,
                 onStartListening = {
                     if (hasMicPermission) {

@@ -53,6 +53,7 @@ class DiagnosticRepository(private val dao: DiagnosticDao) {
             model = vehicleInfo.model,
             year = vehicleInfo.year,
             displacementCc = vehicleInfo.displacementCc,
+            engineType = vehicleInfo.engineType,
             mileage = vehicleInfo.mileage,
             summary = summary,
             confidence = confidence.name,
@@ -114,6 +115,7 @@ class DiagnosticRepository(private val dao: DiagnosticDao) {
                 model = model,
                 year = year,
                 displacementCc = displacementCc,
+                engineType = engineType,
                 mileage = mileage,
                 unknownBrandModel = brand.isBlank() && model.isBlank()
             ),

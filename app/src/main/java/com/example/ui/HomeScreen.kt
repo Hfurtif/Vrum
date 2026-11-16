@@ -3,6 +3,9 @@ package com.example.ui
 import android.content.Intent
 import android.net.Uri
 import android.provider.Settings
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.FastOutSlowInEasing
@@ -109,9 +112,11 @@ import androidx.compose.ui.unit.sp
 import com.example.R
 import com.example.model.ConfidenceLevel
 import com.example.model.DiagnosticResult
+import com.example.model.VehicleCandidateSuggestion
 import com.example.model.VehicleInfo
 import com.example.model.VehicleType
 import com.example.network.PipelineStep
+import com.example.photo.VehiclePhotoHelper
 import com.example.ui.theme.AcousticCyan
 import com.example.ui.theme.AlertRed
 import com.example.ui.theme.CarbonSurface
@@ -139,6 +144,13 @@ fun HomeScreen(
         mileage: String?
     ) -> Unit,
     onToggleUnknownBrandModel: (Boolean) -> Unit,
+    onAnalyzeVehiclePhoto: (Uri) -> Unit,
+    onCancelPhotoIdentification: () -> Unit,
+    onSelectSuggestion: (VehicleCandidateSuggestion) -> Unit,
+    onRejectIdentifiedVehicle: () -> Unit,
+    onNoPhotoSelected: () -> Unit,
+    onResetPhotoStep: () -> Unit,
+    onDismissPhotoError: () -> Unit,
     onSelectTab: (HomeTab) -> Unit,
     onStartListening: () -> Unit,
     onRequestMicPermission: () -> Unit,
@@ -151,6 +163,39 @@ fun HomeScreen(
 ) {
     val context = LocalContext.current
     var showVehicleRequiredHint by rememberSaveable { mutableStateOf(false) }
+    var pendingCameraUriString by rememberSaveable { mutableStateOf<String?>(null) }
+
+    val cameraLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.TakePicture()
+    ) { success ->
+        val uriStr = pendingCameraUriString
+        pendingCameraUriString = null
+        if (success && !uriStr.isNullOrBlank()) {
+            showVehicleRequiredHint = false
+            onAnalyzeVehiclePhoto(Uri.parse(uriStr))
+        }
+    }
+
+    val galleryLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia()
+    ) { uri ->
+        if (uri != null) {
+            showVehicleRequiredHint = false
+            onAnalyzeVehiclePhoto(uri)
+        }
+    }
+
+    fun launchCameraCapture() {
+        val uri = VehiclePhotoHelper.createTempCameraUri(context)
+        pendingCameraUriString = uri.toString()
+        cameraLauncher.launch(uri)
+    }
+
+    fun launchGalleryPicker() {
+        galleryLauncher.launch(
+            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+        )
+    }
 
     fun handleListenTap() {
         if (!uiState.vehicleInfo.canProceedToListen) {
@@ -177,7 +222,8 @@ fun HomeScreen(
             VroumTopBar(
                 activeTab = uiState.activeTab,
                 historyCount = history.size,
-                isSessionBusy = uiState.sessionState is EngineSessionState.Recording ||
+                isSessionBusy = uiState.sessionState is EngineSessionState.PreparingSearch ||
+                    uiState.sessionState is EngineSessionState.Recording ||
                     uiState.sessionState is EngineSessionState.Analyzing,
                 onSelectTab = onSelectTab,
                 onOpenKeysSettings = onOpenKeysSettings
@@ -192,6 +238,12 @@ fun HomeScreen(
                 modifier = Modifier.weight(1f)
             ) { (tab, session) ->
                 when {
+                    session is EngineSessionState.PreparingSearch -> {
+                        PreparingSearchSessionContent(
+                            state = session,
+                            onCancel = onCancelSession
+                        )
+                    }
                     session is EngineSessionState.Recording -> {
                         RecordingSessionContent(
                             state = session,
@@ -216,10 +268,8 @@ fun HomeScreen(
                     }
                     else -> {
                         ListenHomeContent(
-                            vehicleInfo = uiState.vehicleInfo,
+                            uiState = uiState,
                             showVehicleRequiredHint = showVehicleRequiredHint,
-                            errorState = session as? EngineSessionState.Error,
-                            micDeniedMessage = uiState.micPermissionDeniedMessage,
                             onSelectVehicleType = onSelectVehicleType,
                             onUpdateVehicleFields = { brand, model, year, cc, mileage ->
                                 if (brand != null || model != null) {
@@ -231,6 +281,24 @@ fun HomeScreen(
                                 if (unknown) showVehicleRequiredHint = false
                                 onToggleUnknownBrandModel(unknown)
                             },
+                            onTakePhotoClick = ::launchCameraCapture,
+                            onPickFromGalleryClick = ::launchGalleryPicker,
+                            onNoPhotoClick = {
+                                showVehicleRequiredHint = false
+                                onNoPhotoSelected()
+                            },
+                            onCancelPhotoIdentification = onCancelPhotoIdentification,
+                            onConfirmYesClick = ::handleListenTap,
+                            onRejectNoClick = onRejectIdentifiedVehicle,
+                            onSelectSuggestion = { suggestion ->
+                                showVehicleRequiredHint = false
+                                onSelectSuggestion(suggestion)
+                            },
+                            onResetPhotoStep = {
+                                showVehicleRequiredHint = false
+                                onResetPhotoStep()
+                            },
+                            onDismissPhotoError = onDismissPhotoError,
                             onListenClick = ::handleListenTap,
                             onDismissError = onDismissError,
                             onOpenKeysSettings = onOpenKeysSettings,
@@ -392,10 +460,8 @@ private fun SegmentedTabItem(
 
 @Composable
 private fun ListenHomeContent(
-    vehicleInfo: VehicleInfo,
+    uiState: VroumUiState,
     showVehicleRequiredHint: Boolean,
-    errorState: EngineSessionState.Error?,
-    micDeniedMessage: String?,
     onSelectVehicleType: (VehicleType) -> Unit,
     onUpdateVehicleFields: (
         brand: String?,
@@ -405,13 +471,24 @@ private fun ListenHomeContent(
         mileage: String?
     ) -> Unit,
     onToggleUnknownBrandModel: (Boolean) -> Unit,
+    onTakePhotoClick: () -> Unit,
+    onPickFromGalleryClick: () -> Unit,
+    onNoPhotoClick: () -> Unit,
+    onCancelPhotoIdentification: () -> Unit,
+    onConfirmYesClick: () -> Unit,
+    onRejectNoClick: () -> Unit,
+    onSelectSuggestion: (VehicleCandidateSuggestion) -> Unit,
+    onResetPhotoStep: () -> Unit,
+    onDismissPhotoError: () -> Unit,
     onListenClick: () -> Unit,
     onDismissError: () -> Unit,
     onOpenKeysSettings: () -> Unit,
     onOpenAppSettings: () -> Unit,
     onRetryMic: () -> Unit
 ) {
-    var showOptionalFields by rememberSaveable { mutableStateOf(true) }
+    val vehicleInfo = uiState.vehicleInfo
+    val errorState = uiState.sessionState as? EngineSessionState.Error
+    val micDeniedMessage = uiState.micPermissionDeniedMessage
 
     Column(
         modifier = Modifier
@@ -499,7 +576,7 @@ private fun ListenHomeContent(
             }
         }
 
-        // 3 big Vehicle Type buttons: Moto / Voiture / Autre
+        // 3 Vehicle Type buttons: Moto / Voiture / Autre
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(10.dp)
@@ -535,210 +612,61 @@ private fun ListenHomeContent(
 
         Spacer(modifier = Modifier.height(14.dp))
 
-        // Vehicle identification & optional details
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            shape = MaterialTheme.shapes.medium,
-            colors = CardDefaults.cardColors(containerColor = CarbonSurface),
-            border = BorderStroke(
-                width = 1.dp,
-                color = if (showVehicleRequiredHint && !vehicleInfo.canProceedToListen) CautionAmber else HairlineBorder
-            )
-        ) {
-            Column(modifier = Modifier.fillMaxWidth()) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable { showOptionalFields = !showOptionalFields }
-                        .minimumInteractiveComponentSize()
-                        .padding(horizontal = 16.dp, vertical = 12.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = "Infos véhicule",
-                            style = MaterialTheme.typography.titleMedium,
-                            color = MaterialTheme.colorScheme.onSurface
-                        )
-                        val summary = if (vehicleInfo.unknownBrandModel) {
-                            listOfNotNull(
-                                "Analyse générale (modèle inconnu)",
-                                vehicleInfo.displacementCc.takeIf { it.isNotBlank() }?.let { "$it cc" },
-                                vehicleInfo.year.takeIf { it.isNotBlank() }
-                            ).joinToString(" • ")
-                        } else {
-                            listOfNotNull(
-                                vehicleInfo.brand.takeIf { it.isNotBlank() },
-                                vehicleInfo.model.takeIf { it.isNotBlank() },
-                                vehicleInfo.displacementCc.takeIf { it.isNotBlank() }?.let { "$it cc" },
-                                vehicleInfo.year.takeIf { it.isNotBlank() }
-                            ).joinToString(" • ")
-                        }
-                        Text(
-                            text = summary.ifBlank { "Marque et modèle requis (ou « Je ne sais pas »)" },
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = if (summary.isBlank()) MaterialTheme.colorScheme.onSurfaceVariant else AcousticCyan,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
-                    Icon(
-                        imageVector = if (showOptionalFields || showVehicleRequiredHint) {
-                            Icons.Rounded.ExpandLess
-                        } else {
-                            Icons.Rounded.ExpandMore
-                        },
-                        contentDescription = "Afficher les infos véhicule",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-
-                AnimatedVisibility(visible = showOptionalFields || showVehicleRequiredHint) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(start = 16.dp, end = 16.dp, bottom = 16.dp),
-                        verticalArrangement = Arrangement.spacedBy(10.dp)
-                    ) {
-                        if (showVehicleRequiredHint && !vehicleInfo.canProceedToListen) {
-                            Surface(
-                                shape = MaterialTheme.shapes.small,
-                                color = CautionAmber.copy(alpha = 0.16f),
-                                border = BorderStroke(1.dp, CautionAmber.copy(alpha = 0.6f)),
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
-                                Text(
-                                    text = "Indique la marque et le modèle, ou appuie sur « Je ne sais pas » pour lancer une analyse générale.",
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = CautionAmber,
-                                    modifier = Modifier.padding(10.dp)
-                                )
-                            }
-                        }
-
-                        if (!vehicleInfo.unknownBrandModel) {
-                            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                                VehicleTextField(
-                                    value = vehicleInfo.brand,
-                                    onValueChange = { onUpdateVehicleFields(it, null, null, null, null) },
-                                    label = "Marque *",
-                                    placeholder = "Ex: Yamaha",
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .testTag("input_brand")
-                                )
-                                VehicleTextField(
-                                    value = vehicleInfo.model,
-                                    onValueChange = { onUpdateVehicleFields(null, it, null, null, null) },
-                                    label = "Modèle *",
-                                    placeholder = "Ex: MT-07",
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .testTag("input_model")
-                                )
-                            }
-
-                            OutlinedButton(
-                                onClick = { onToggleUnknownBrandModel(true) },
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .height(48.dp)
-                                    .testTag("unknown_brand_model_button"),
-                                border = BorderStroke(1.dp, HairlineBorder),
-                                shape = MaterialTheme.shapes.small
-                            ) {
-                                Text(
-                                    text = "Je ne sais pas",
-                                    style = MaterialTheme.typography.labelLarge,
-                                    color = AcousticCyan
-                                )
-                            }
-                        } else {
-                            Surface(
-                                shape = MaterialTheme.shapes.small,
-                                color = ElevatedPanel,
-                                border = BorderStroke(1.dp, AcousticCyan.copy(alpha = 0.45f)),
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
-                                Row(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(horizontal = 12.dp, vertical = 8.dp),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                    verticalAlignment = Alignment.CenterVertically
-                                ) {
-                                    Text(
-                                        text = "Étape passée • Analyse générale (confiance plus basse)",
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        color = AcousticCyan,
-                                        modifier = Modifier.weight(1f)
-                                    )
-                                    TextButton(onClick = { onToggleUnknownBrandModel(false) }) {
-                                        Text("Saisir", color = IgnitionAmber)
-                                    }
-                                }
-                            }
-                        }
-
-                        Text(
-                            text = "Détails optionnels (affinent le type de moteur)",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-
-                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                            VehicleTextField(
-                                value = vehicleInfo.year,
-                                onValueChange = { onUpdateVehicleFields(null, null, it, null, null) },
-                                label = "Année",
-                                placeholder = "Ex: 2019",
-                                keyboardType = KeyboardType.Number,
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .testTag("input_year")
-                            )
-                            VehicleTextField(
-                                value = vehicleInfo.displacementCc,
-                                onValueChange = { onUpdateVehicleFields(null, null, null, it, null) },
-                                label = "Cylindrée (cc)",
-                                placeholder = "Ex: 689",
-                                keyboardType = KeyboardType.Number,
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .testTag("input_displacement_cc")
-                            )
-                        }
-
-                        VehicleTextField(
-                            value = vehicleInfo.mileage,
-                            onValueChange = { onUpdateVehicleFields(null, null, null, null, it) },
-                            label = "Kilométrage",
-                            placeholder = "Ex: 32000",
-                            keyboardType = KeyboardType.Number,
-                            imeAction = ImeAction.Done,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .testTag("input_mileage")
-                        )
-                    }
-                }
-            }
-        }
-
-        Spacer(modifier = Modifier.height(26.dp))
-
-        // Big Shazam-like primary button: "Écouter le moteur"
-        ShazamListenButton(onClick = onListenClick)
-
-        Spacer(modifier = Modifier.height(20.dp))
-
-        Text(
-            text = "Enregistrement guidé en 30 s (ralenti + accélération + arrêt)",
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            textAlign = TextAlign.Center
+        // Photo identification / confirmation / manual fallback step
+        VehiclePhotoIdentificationCard(
+            photoStepPhase = uiState.photoStepPhase,
+            photoPreviewBitmap = uiState.photoPreviewBitmap,
+            identificationResult = uiState.identificationResult,
+            vehicleInfo = vehicleInfo,
+            isLowConfidenceMatch = uiState.isLowConfidenceMatch,
+            openedFromNoPhoto = uiState.openedFromNoPhoto,
+            photoError = uiState.photoError,
+            showVehicleRequiredHint = showVehicleRequiredHint,
+            onTakePhotoClick = onTakePhotoClick,
+            onPickFromGalleryClick = onPickFromGalleryClick,
+            onNoPhotoClick = onNoPhotoClick,
+            onCancelPhotoIdentification = onCancelPhotoIdentification,
+            onConfirmYesClick = onConfirmYesClick,
+            onRejectNoClick = onRejectNoClick,
+            onSelectSuggestion = onSelectSuggestion,
+            onUpdateVehicleFields = onUpdateVehicleFields,
+            onToggleUnknownBrandModel = onToggleUnknownBrandModel,
+            onResetPhotoStep = onResetPhotoStep,
+            onDismissPhotoError = onDismissPhotoError
         )
+
+        if (uiState.photoStepPhase == PhotoStepPhase.MANUAL_OR_CORRECT) {
+            Spacer(modifier = Modifier.height(22.dp))
+
+            // Big Shazam-like primary button: "Écouter le moteur"
+            ShazamListenButton(onClick = onListenClick)
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            Text(
+                text = "Enregistrement guidé en 30 s (ralenti + accélération + arrêt)",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center
+            )
+        } else {
+            Spacer(modifier = Modifier.height(18.dp))
+
+            Text(
+                text = when (uiState.photoStepPhase) {
+                    PhotoStepPhase.CONFIRM_MATCH ->
+                        "Appuie sur « Oui » pour rechercher les pannes courantes et lancer l'écoute."
+                    PhotoStepPhase.IDENTIFYING ->
+                        "L'enregistrement audio de 30 s commencera juste après l'identification."
+                    else ->
+                        "Identifie ton véhicule par photo ou sans photo avant d'écouter le moteur."
+                },
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.padding(horizontal = 12.dp)
+            )
+        }
 
         Spacer(modifier = Modifier.height(28.dp))
     }
@@ -1278,6 +1206,61 @@ private fun formatCountdownSeconds(seconds: Int): String {
     val mins = safe / 60
     val secs = safe % 60
     return String.format(Locale.ROOT, "%02d:%02d", mins, secs)
+}
+
+@Composable
+private fun PreparingSearchSessionContent(
+    state: EngineSessionState.PreparingSearch,
+    onCancel: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(horizontal = 24.dp, vertical = 20.dp)
+            .testTag("preparing_search_screen"),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        CircularProgressIndicator(
+            modifier = Modifier.size(58.dp),
+            color = AcousticCyan,
+            trackColor = ElevatedPanel,
+            strokeWidth = 5.dp
+        )
+
+        Spacer(modifier = Modifier.height(22.dp))
+
+        Text(
+            text = "Recherche des pannes courantes…",
+            style = MaterialTheme.typography.headlineMedium,
+            color = MaterialTheme.colorScheme.onBackground,
+            textAlign = TextAlign.Center
+        )
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        Text(
+            text = state.vehicleLabel,
+            style = MaterialTheme.typography.titleMedium,
+            color = IgnitionAmber,
+            textAlign = TextAlign.Center
+        )
+
+        Spacer(modifier = Modifier.height(8.dp))
+
+        Text(
+            text = "L'enregistrement audio du moteur démarre juste après.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center
+        )
+
+        Spacer(modifier = Modifier.height(24.dp))
+
+        TextButton(onClick = onCancel) {
+            Text("Annuler", color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
 }
 
 @Composable

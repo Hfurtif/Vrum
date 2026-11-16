@@ -30,6 +30,8 @@ class DiagnosticPipeline(
         keys: ApiKeys,
         vehicleInfo: VehicleInfo,
         audio: RecordedEngineAudio,
+        prefetchedPerplexityResult: PerplexityResult? = null,
+        prefetchedPerplexityWarning: String? = null,
         onStepProgress: (PipelineStep) -> Unit
     ): DiagnosticResult {
         if (!isNetworkAvailable()) {
@@ -52,6 +54,9 @@ class DiagnosticPipeline(
                 )
 
                 val optionalWarnings = mutableListOf<String>()
+                if (!prefetchedPerplexityWarning.isNullOrBlank()) {
+                    optionalWarnings.add(prefetchedPerplexityWarning)
+                }
 
                 onStepProgress(PipelineStep.GEMINI_EAR)
                 val (geminiDesc, perplexityRes) = coroutineScope {
@@ -59,7 +64,12 @@ class DiagnosticPipeline(
                         aiClients.describeAudioWithGemini(keys.geminiKey, audio.wavBytes)
                     }
 
-                    val perplexityDeferred = if (keys.perplexityKey.isNotBlank() && vehicleInfo.hasBrandAndModel) {
+                    val shouldFetchPerplexity = prefetchedPerplexityResult == null &&
+                        prefetchedPerplexityWarning == null &&
+                        keys.perplexityKey.isNotBlank() &&
+                        vehicleInfo.hasBrandAndModel
+
+                    val perplexityDeferred = if (shouldFetchPerplexity) {
                         async {
                             try {
                                 onStepProgress(PipelineStep.PERPLEXITY_SEARCH)
@@ -73,7 +83,7 @@ class DiagnosticPipeline(
                         null
                     }
 
-                    geminiDeferred.await() to perplexityDeferred?.await()
+                    geminiDeferred.await() to (prefetchedPerplexityResult ?: perplexityDeferred?.await())
                 }
 
                 onStepProgress(PipelineStep.OPENAI_CHEF)

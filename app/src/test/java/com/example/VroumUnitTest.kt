@@ -108,4 +108,62 @@ class VroumUnitTest {
         assertEquals(true, complete.canProceedToListen)
         assertTrue(complete.searchDescriptor().contains("689cc"))
     }
+
+    @Test
+    fun `vehicle identification parser handles high confidence and confirmation question`() {
+        val raw = """
+            ```json
+            {
+              "type_vehicule": "moto",
+              "marque": "Yamaha",
+              "modele": "MT-07",
+              "annee_approximative": "2020",
+              "cylindree": "689 cc",
+              "type_moteur": "Bicylindre en ligne 4 temps",
+              "niveau_certitude": "élevé",
+              "suggestions": []
+            }
+            ```
+        """.trimIndent()
+
+        val result = DiagnosisResponseParser.parseVehicleIdentification(raw)
+        assertEquals(com.example.model.VehicleType.MOTO, result.vehicleType)
+        assertEquals("Yamaha", result.brand)
+        assertEquals("MT-07", result.model)
+        assertEquals("2020", result.year)
+        assertEquals("689", result.displacementCc)
+        assertEquals("Bicylindre en ligne 4 temps", result.engineType)
+        assertEquals(ConfidenceLevel.ELEVE, result.confidence)
+        assertEquals("C'est une Yamaha MT-07 2020 ?", result.confirmationQuestion())
+    }
+
+    @Test
+    fun `vehicle identification parser keeps multiple suggestions on low confidence`() {
+        val raw = """
+            {
+              "type_vehicule": "moto",
+              "marque": "Kawasaki",
+              "modele": "Z650",
+              "annee_approximative": "2019",
+              "cylindree": "649",
+              "type_moteur": "Bicylindre parallèle 4 temps",
+              "niveau_certitude": "faible",
+              "suggestions": [
+                {
+                  "marque": "Kawasaki",
+                  "modele": "Z900",
+                  "annee_approximative": "2020",
+                  "cylindree": "948",
+                  "type_moteur": "4 cylindres en ligne"
+                }
+              ]
+            }
+        """.trimIndent()
+
+        val result = DiagnosisResponseParser.parseVehicleIdentification(raw)
+        assertEquals(ConfidenceLevel.FAIBLE, result.confidence)
+        assertEquals(2, result.suggestions.size)
+        assertEquals("Z650", result.suggestions[0].model)
+        assertEquals("Z900", result.suggestions[1].model)
+    }
 }

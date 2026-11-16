@@ -1,6 +1,8 @@
 package com.example.ui
 
 import android.app.Application
+import android.graphics.Bitmap
+import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.BuildConfig
@@ -9,14 +11,21 @@ import com.example.audio.VoiceGuide
 import com.example.data.local.DiagnosticRepository
 import com.example.data.local.VroumDatabase
 import com.example.model.ApiKeys
+import com.example.model.ConfidenceLevel
 import com.example.model.DiagnosticResult
+import com.example.model.VehicleCandidateSuggestion
+import com.example.model.VehicleIdentificationResult
 import com.example.model.VehicleInfo
 import com.example.model.VehicleType
 import com.example.network.DiagnosticApiException
 import com.example.network.DiagnosticPipeline
+import com.example.network.EngineAiClients
+import com.example.network.PerplexityResult
 import com.example.network.PipelineStep
+import com.example.photo.VehiclePhotoHelper
 import com.example.security.KeyStorage
 import com.example.security.SecureKeyStorage
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -26,14 +35,26 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
 enum class HomeTab {
     LISTEN,
     HISTORY
 }
 
+enum class PhotoStepPhase {
+    PICK_OR_NO_PHOTO,
+    IDENTIFYING,
+    CONFIRM_MATCH,
+    MANUAL_OR_CORRECT
+}
+
 sealed interface EngineSessionState {
     data object Idle : EngineSessionState
+    data class PreparingSearch(
+        val vehicleLabel: String
+    ) : EngineSessionState
+
     data class Recording(
         val phase: Int,
         val secondsRemaining: Int,
@@ -59,6 +80,12 @@ data class VroumUiState(
     val apiKeys: ApiKeys = ApiKeys(),
     val vehicleInfo: VehicleInfo = VehicleInfo(),
     val activeTab: HomeTab = HomeTab.LISTEN,
+    val photoStepPhase: PhotoStepPhase = PhotoStepPhase.PICK_OR_NO_PHOTO,
+    val photoPreviewBitmap: Bitmap? = null,
+    val identificationResult: VehicleIdentificationResult? = null,
+    val photoError: String? = null,
+    val isLowConfidenceMatch: Boolean = false,
+    val openedFromNoPhoto: Boolean = false,
     val sessionState: EngineSessionState = EngineSessionState.Idle,
     val activeResult: DiagnosticResult? = null,
     val micPermissionDeniedMessage: String? = null
@@ -71,7 +98,8 @@ class VroumViewModel(application: Application) : AndroidViewModel(application) {
         VroumDatabase.getInstance(application).diagnosticDao()
     )
     private val recorder = EngineAudioRecorder()
-    private val pipeline = DiagnosticPipeline(application)
+    private val aiClients = EngineAiClients()
+    private val pipeline = DiagnosticPipeline(application, aiClients)
     private val voiceGuide = VoiceGuide(application)
 
     private val _uiState = MutableStateFlow(
@@ -103,6 +131,16 @@ class VroumViewModel(application: Application) : AndroidViewModel(application) {
         )
 
     private var sessionJob: Job? = null
+    private var photoJob: Job? = null
+    private var prefetchedDescriptor: String? = null
+    private var prefetchedPerplexityResult: PerplexityResult? = null
+    private var prefetchedPerplexityWarning: String? = null
+
+    private fun clearPrefetchedSearch() {
+        prefetchedDescriptor = null
+        prefetchedPerplexityResult = null
+        prefetchedPerplexityWarning = null
+    }
 
     fun hasRequiredKeys(): Boolean = _uiState.value.apiKeys.hasRequiredKeys
 
@@ -112,6 +150,7 @@ class VroumViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun selectVehicleType(type: VehicleType) {
+        clearPrefetchedSearch()
         _uiState.update { it.copy(vehicleInfo = it.vehicleInfo.copy(type = type)) }
     }
 
@@ -122,6 +161,9 @@ class VroumViewModel(application: Application) : AndroidViewModel(application) {
         displacementCc: String? = null,
         mileage: String? = null
     ) {
+        if (brand != null || model != null || year != null || displacementCc != null) {
+            clearPrefetchedSearch()
+        }
         _uiState.update { state ->
             val current = state.vehicleInfo
             val nextBrand = brand ?: current.brand
@@ -141,6 +183,7 @@ class VroumViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun setUnknownBrandModel(unknown: Boolean) {
+        clearPrefetchedSearch()
         _uiState.update { state ->
             state.copy(
                 vehicleInfo = state.vehicleInfo.copy(
@@ -150,6 +193,156 @@ class VroumViewModel(application: Application) : AndroidViewModel(application) {
                 )
             )
         }
+    }
+
+    fun analyzeVehiclePhoto(uri: Uri) {
+        val geminiKey = _uiState.value.apiKeys.geminiKey
+        if (geminiKey.isBlank()) {
+            _uiState.update {
+                it.copy(
+                    photoError = "La clé Gemini est requise pour identifier la photo. Configure-la via ⚙️."
+                )
+            }
+            return
+        }
+
+        photoJob?.cancel()
+        clearPrefetchedSearch()
+        photoJob = viewModelScope.launch {
+            _uiState.update {
+                it.copy(
+                    photoStepPhase = PhotoStepPhase.IDENTIFYING,
+                    photoError = null,
+                    identificationResult = null,
+                    isLowConfidenceMatch = false,
+                    openedFromNoPhoto = false
+                )
+            }
+            try {
+                val prepared = VehiclePhotoHelper.preparePhotoForGemini(getApplication(), uri)
+                _uiState.update { it.copy(photoPreviewBitmap = prepared.previewBitmap) }
+
+                val identification = aiClients.identifyVehicleFromPhotoWithGemini(
+                    apiKey = geminiKey,
+                    jpegBytes = prepared.jpegBytes
+                )
+
+                val isLowConfidence = identification.confidence == ConfidenceLevel.FAIBLE ||
+                    !identification.hasPrimaryGuess
+
+                _uiState.update { state ->
+                    val updatedVehicle = state.vehicleInfo.copy(
+                        type = identification.vehicleType ?: state.vehicleInfo.type,
+                        brand = identification.brand,
+                        model = identification.model,
+                        year = identification.year,
+                        displacementCc = identification.displacementCc,
+                        engineType = identification.engineType,
+                        unknownBrandModel = false
+                    )
+                    state.copy(
+                        vehicleInfo = updatedVehicle,
+                        identificationResult = identification,
+                        photoStepPhase = if (isLowConfidence) {
+                            PhotoStepPhase.MANUAL_OR_CORRECT
+                        } else {
+                            PhotoStepPhase.CONFIRM_MATCH
+                        },
+                        isLowConfidenceMatch = isLowConfidence,
+                        openedFromNoPhoto = false,
+                        photoError = null
+                    )
+                }
+            } catch (_: CancellationException) {
+                _uiState.update { it.copy(photoStepPhase = PhotoStepPhase.PICK_OR_NO_PHOTO) }
+            } catch (e: DiagnosticApiException) {
+                _uiState.update {
+                    it.copy(
+                        photoStepPhase = PhotoStepPhase.PICK_OR_NO_PHOTO,
+                        photoError = e.message ?: "Impossible d'analyser cette photo."
+                    )
+                }
+            } catch (e: Exception) {
+                _uiState.update {
+                    it.copy(
+                        photoStepPhase = PhotoStepPhase.PICK_OR_NO_PHOTO,
+                        photoError = e.localizedMessage ?: "Erreur lors de la lecture de la photo."
+                    )
+                }
+            }
+        }
+    }
+
+    fun cancelPhotoIdentification() {
+        photoJob?.cancel()
+        photoJob = null
+        _uiState.update {
+            it.copy(
+                photoStepPhase = PhotoStepPhase.PICK_OR_NO_PHOTO,
+                photoError = null
+            )
+        }
+    }
+
+    fun selectIdentificationSuggestion(suggestion: VehicleCandidateSuggestion) {
+        clearPrefetchedSearch()
+        _uiState.update { state ->
+            state.copy(
+                vehicleInfo = state.vehicleInfo.copy(
+                    type = suggestion.vehicleType ?: state.vehicleInfo.type,
+                    brand = suggestion.brand,
+                    model = suggestion.model,
+                    year = suggestion.year.ifBlank { state.vehicleInfo.year },
+                    displacementCc = suggestion.displacementCc.ifBlank { state.vehicleInfo.displacementCc },
+                    engineType = suggestion.engineType.ifBlank { state.vehicleInfo.engineType },
+                    unknownBrandModel = false
+                )
+            )
+        }
+    }
+
+    fun onRejectIdentifiedVehicle() {
+        clearPrefetchedSearch()
+        _uiState.update {
+            it.copy(
+                photoStepPhase = PhotoStepPhase.MANUAL_OR_CORRECT,
+                isLowConfidenceMatch = false,
+                openedFromNoPhoto = false
+            )
+        }
+    }
+
+    fun onNoPhotoSelected() {
+        clearPrefetchedSearch()
+        _uiState.update {
+            it.copy(
+                photoStepPhase = PhotoStepPhase.MANUAL_OR_CORRECT,
+                photoPreviewBitmap = null,
+                identificationResult = null,
+                photoError = null,
+                isLowConfidenceMatch = false,
+                openedFromNoPhoto = true
+            )
+        }
+    }
+
+    fun resetPhotoStep() {
+        photoJob?.cancel()
+        clearPrefetchedSearch()
+        _uiState.update {
+            it.copy(
+                photoStepPhase = PhotoStepPhase.PICK_OR_NO_PHOTO,
+                photoPreviewBitmap = null,
+                identificationResult = null,
+                photoError = null,
+                isLowConfidenceMatch = false,
+                openedFromNoPhoto = false
+            )
+        }
+    }
+
+    fun dismissPhotoError() {
+        _uiState.update { it.copy(photoError = null) }
     }
 
     fun selectHomeTab(tab: HomeTab) {
@@ -171,7 +364,8 @@ class VroumViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun startListeningAndDiagnose(onDiagnosticReady: (Long) -> Unit) {
-        if (_uiState.value.sessionState is EngineSessionState.Recording ||
+        if (_uiState.value.sessionState is EngineSessionState.PreparingSearch ||
+            _uiState.value.sessionState is EngineSessionState.Recording ||
             _uiState.value.sessionState is EngineSessionState.Analyzing
         ) {
             return
@@ -197,6 +391,36 @@ class VroumViewModel(application: Application) : AndroidViewModel(application) {
         sessionJob = viewModelScope.launch {
             var lastSpokenPhase = 0
             try {
+                // Step 1 after confirmation: if a search key is present and a vehicle model is identified,
+                // search common faults before launching the audio recording session.
+                val descriptor = vehicle.searchDescriptor()
+                if (keys.perplexityKey.isNotBlank() &&
+                    vehicle.hasBrandAndModel &&
+                    prefetchedDescriptor != descriptor
+                ) {
+                    _uiState.update {
+                        it.copy(sessionState = EngineSessionState.PreparingSearch(vehicle.displayTitle()))
+                    }
+                    try {
+                        val result = withTimeoutOrNull(25_000L) {
+                            aiClients.searchKnownFaultsWithPerplexity(keys.perplexityKey, vehicle)
+                        }
+                        if (result != null) {
+                            prefetchedDescriptor = descriptor
+                            prefetchedPerplexityResult = result
+                            prefetchedPerplexityWarning = null
+                        } else {
+                            prefetchedDescriptor = descriptor
+                            prefetchedPerplexityResult = null
+                            prefetchedPerplexityWarning = "Recherche web trop lente, diagnostic poursuivi sans historique web."
+                        }
+                    } catch (e: DiagnosticApiException) {
+                        prefetchedDescriptor = descriptor
+                        prefetchedPerplexityResult = null
+                        prefetchedPerplexityWarning = "Recherche des pannes ignorée : ${e.message}"
+                    }
+                }
+
                 val phase1Text = "Moteur au ralenti, ne touchez à rien"
                 val phase2Text = "Accélérez doucement jusqu'à 4000 tr/min, puis relâchez"
                 val phase3Text = "Laissez revenir au ralenti, puis coupez le moteur"
@@ -274,12 +498,17 @@ class VroumViewModel(application: Application) : AndroidViewModel(application) {
                 // Short pause so user hears "Coupez le moteur" cleanly before spinner appears
                 delay(1100)
 
-                val completed = mutableSetOf<PipelineStep>()
+                val preDoneSteps = if (prefetchedPerplexityResult != null) {
+                    setOf(PipelineStep.PERPLEXITY_SEARCH)
+                } else {
+                    emptySet()
+                }
+                val completed = preDoneSteps.toMutableSet()
                 _uiState.update {
                     it.copy(
                         sessionState = EngineSessionState.Analyzing(
                             currentStep = PipelineStep.LOCAL_DSP,
-                            completedSteps = emptySet()
+                            completedSteps = completed.toSet()
                         )
                     )
                 }
@@ -288,6 +517,8 @@ class VroumViewModel(application: Application) : AndroidViewModel(application) {
                     keys = keys,
                     vehicleInfo = vehicle,
                     audio = recorded,
+                    prefetchedPerplexityResult = prefetchedPerplexityResult,
+                    prefetchedPerplexityWarning = prefetchedPerplexityWarning,
                     onStepProgress = { step ->
                         _uiState.update { state ->
                             val prev = (state.sessionState as? EngineSessionState.Analyzing)?.currentStep

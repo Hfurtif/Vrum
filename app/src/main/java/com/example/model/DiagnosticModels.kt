@@ -12,11 +12,12 @@ enum class VehicleType(val label: String, val promptLabel: String) {
 }
 
 data class VehicleInfo(
-    val type: VehicleType = VehicleType.VOITURE,
+    val type: VehicleType = VehicleType.MOTO,
     val brand: String = "",
     val model: String = "",
     val year: String = "",
     val displacementCc: String = "",
+    val engineType: String = "",
     val mileage: String = "",
     val unknownBrandModel: Boolean = false
 ) {
@@ -48,8 +49,48 @@ data class VehicleInfo(
             if (model.trim().isNotEmpty()) add(model.trim())
             if (year.trim().isNotEmpty()) add(year.trim())
             if (displacementCc.trim().isNotEmpty()) add("${displacementCc.trim()}cc")
+            if (engineType.trim().isNotEmpty()) add(engineType.trim())
         }
         return if (parts.isEmpty()) "moteur ${type.promptLabel}" else parts.joinToString(" ")
+    }
+}
+
+data class VehicleCandidateSuggestion(
+    val brand: String,
+    val model: String,
+    val year: String = "",
+    val displacementCc: String = "",
+    val engineType: String = "",
+    val vehicleType: VehicleType? = null
+) {
+    fun displayLabel(): String = buildList {
+        if (brand.isNotBlank()) add(brand.trim())
+        if (model.isNotBlank()) add(model.trim())
+        if (year.isNotBlank()) add(year.trim())
+        if (displacementCc.isNotBlank()) add("${displacementCc.trim()} cc")
+    }.joinToString(" ")
+}
+
+data class VehicleIdentificationResult(
+    val vehicleType: VehicleType? = null,
+    val brand: String = "",
+    val model: String = "",
+    val year: String = "",
+    val displacementCc: String = "",
+    val engineType: String = "",
+    val confidence: ConfidenceLevel = ConfidenceLevel.FAIBLE,
+    val suggestions: List<VehicleCandidateSuggestion> = emptyList()
+) {
+    val hasPrimaryGuess: Boolean
+        get() = brand.trim().isNotEmpty() && model.trim().isNotEmpty()
+
+    fun confirmationQuestion(): String {
+        val parts = listOfNotNull(
+            brand.trim().takeIf { it.isNotEmpty() },
+            model.trim().takeIf { it.isNotEmpty() },
+            year.trim().takeIf { it.isNotEmpty() }
+        ).joinToString(" ")
+        return "C'est une $parts ?"
     }
 }
 

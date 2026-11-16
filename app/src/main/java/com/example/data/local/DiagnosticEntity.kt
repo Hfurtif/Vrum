@@ -12,6 +12,7 @@ data class DiagnosticEntity(
     val model: String,
     val year: String,
     val displacementCc: String,
+    val engineType: String = "",
     val mileage: String,
     val summary: String,
     val confidence: String,
