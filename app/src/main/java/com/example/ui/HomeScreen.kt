@@ -1,11 +1,14 @@
 package com.example.ui
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.FastOutSlowInEasing
@@ -63,6 +66,7 @@ import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Timer
 import androidx.compose.material.icons.rounded.TwoWheeler
 import androidx.compose.material.icons.rounded.WarningAmber
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -164,6 +168,7 @@ fun HomeScreen(
     val context = LocalContext.current
     var showVehicleRequiredHint by rememberSaveable { mutableStateOf(false) }
     var pendingCameraUriString by rememberSaveable { mutableStateOf<String?>(null) }
+    var showCameraDeniedDialog by rememberSaveable { mutableStateOf(false) }
 
     val cameraLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.TakePicture()
@@ -173,6 +178,18 @@ fun HomeScreen(
         if (success && !uriStr.isNullOrBlank()) {
             showVehicleRequiredHint = false
             onAnalyzeVehiclePhoto(Uri.parse(uriStr))
+        }
+    }
+
+    val cameraPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) {
+            val uri = VehiclePhotoHelper.createTempCameraUri(context)
+            pendingCameraUriString = uri.toString()
+            cameraLauncher.launch(uri)
+        } else {
+            showCameraDeniedDialog = true
         }
     }
 
@@ -186,14 +203,66 @@ fun HomeScreen(
     }
 
     fun launchCameraCapture() {
-        val uri = VehiclePhotoHelper.createTempCameraUri(context)
-        pendingCameraUriString = uri.toString()
-        cameraLauncher.launch(uri)
+        val hasCameraPermission = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.CAMERA
+        ) == PackageManager.PERMISSION_GRANTED
+        if (hasCameraPermission) {
+            val uri = VehiclePhotoHelper.createTempCameraUri(context)
+            pendingCameraUriString = uri.toString()
+            cameraLauncher.launch(uri)
+        } else {
+            cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+        }
     }
 
     fun launchGalleryPicker() {
         galleryLauncher.launch(
             PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+        )
+    }
+
+    if (showCameraDeniedDialog) {
+        AlertDialog(
+            onDismissRequest = { showCameraDeniedDialog = false },
+            containerColor = CarbonSurface,
+            title = {
+                Text(
+                    text = "Autorisation appareil photo requise",
+                    style = MaterialTheme.typography.titleLarge,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+            },
+            text = {
+                Text(
+                    text = "Vroum a besoin de l'appareil photo pour photographier ta moto. Tu peux l'autoriser dans les paramètres Android ou choisir une photo depuis la galerie.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showCameraDeniedDialog = false
+                        val intent = Intent(
+                            Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                            Uri.fromParts("package", context.packageName, null)
+                        )
+                        runCatching { context.startActivity(intent) }
+                    },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = IgnitionAmber,
+                        contentColor = VoidObsidian
+                    )
+                ) {
+                    Text("Paramètres")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showCameraDeniedDialog = false }) {
+                    Text("Fermer", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
         )
     }
 
