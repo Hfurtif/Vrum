@@ -2,6 +2,6 @@
     <string name="app_name">Vroum</string>
     <string name="app_slogan">Écoute ton moteur.</string>
     <string name="home_greeting">Salut ! Vroum écoute ton moteur et te dit ce qui ne va pas.</string>
-    <string name="btn_listen_engine">Écouter le moteur</string>
+    <string name="btn_listen_engine">Démarrer l\'analyse</string>
     <string name="disclaimer_estimate">Ce diagnostic est une estimation, pas une certitude. En cas de doute, consultez un mécanicien.</string>
 </resources>
